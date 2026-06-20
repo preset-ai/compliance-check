@@ -1,0 +1,38 @@
+# Preset Design System Check — OIDC auth (no secret paste)
+#
+# Recommended setup for the per-run telemetry callback. Requires:
+#   1. The Preset GitHub App installed on this repo (or its org).
+#      Install URL: https://github.com/apps/preset-ai
+#   2. The install bound to a design system on app.presetai.dev.
+#   3. `permissions: id-token: write` on this workflow (below).
+#
+# No PRESET_API_KEY secret is needed. The Action mints a fresh OIDC token
+# per run, scoped to this repo. The Preset gateway verifies the token,
+# looks up the bound design system from the installation, and records the
+# run.
+
+name: Design System Check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write   # required for OIDC; without it the Action falls back to preset-api-key
+
+jobs:
+  preset-check:
+    name: Preset Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: preset-ai/compliance-check@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+          # No preset-api-key needed — the App install + id-token permission
+          # is the auth. Add `preset-api-key: ${{ secrets.PRESET_API_KEY }}`
+          # only if your runner can't grant id-token: write.

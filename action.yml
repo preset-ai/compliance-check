@@ -1,0 +1,99 @@
+name: 'Preset Design System Check'
+description: 'Validate PR code against your design system rules — AI slop detection, forbidden primitives, token misuse, and more'
+author: 'preset.dev'
+branding:
+  icon: 'check-circle'
+  color: 'gray-dark'
+
+inputs:
+  github-token:
+    description: 'GitHub token for PR comments and annotations'
+    required: false
+    default: ${{ github.token }}
+  supabase-url:
+    description: 'Supabase project URL (enables full DB validation)'
+    required: false
+  supabase-key:
+    description: 'Supabase anon key'
+    required: false
+  design-system-id:
+    description: 'Design system UUID'
+    required: false
+  layer-id:
+    description: 'Optional layer ID for multi-layer design systems'
+    required: false
+  include:
+    description: 'Comma-separated glob patterns for files to check'
+    required: false
+    default: '**/*.tsx,**/*.jsx,**/*.ts,**/*.vue,**/*.svelte'
+  exclude:
+    description: 'Comma-separated glob patterns for files to skip'
+    required: false
+    default: '**/node_modules/**'
+  fail-on-errors:
+    description: 'Fail the check if errors are found'
+    required: false
+    default: 'true'
+  composition-checks:
+    description: 'Run static composition-conformance checks (forbidden Card>Card, max-depth, no-arbitrary-spacing) against changed JSX/TSX files. PRE-1484 first slice.'
+    required: false
+    default: 'false'
+  fail-on-warnings:
+    description: 'Fail the check if warnings are found'
+    required: false
+    default: 'false'
+  comment-on-pr:
+    description: 'Post/update a PR comment with results'
+    required: false
+    default: 'true'
+  upload-sarif:
+    description: 'Generate SARIF file for GitHub Code Scanning'
+    required: false
+    default: 'false'
+  score-threshold:
+    description: 'Minimum health score to pass (0-100, 0 = disabled)'
+    required: false
+    default: '0'
+  regression-threshold:
+    description: 'Max allowed score drop from previous snapshot (0 = disabled)'
+    required: false
+    default: '0'
+  fail-on-new-only:
+    description: 'Only fail on new violations not in the baseline (requires baseline set in DB)'
+    required: false
+    default: 'false'
+  preset-api-key:
+    description: 'Preset API key (pk_live_* or pk_test_*). Legacy fallback used only when OIDC is unavailable. With the Preset GitHub App installed and `permissions: id-token: write` set on the workflow, no key is needed. See README "Authentication" for the recommended OIDC path.'
+    required: false
+  mcp-gateway-url:
+    description: 'Override base URL for the MCP gateway (callback target). Defaults to the production endpoint.'
+    required: false
+    default: 'https://mcp.presetai.dev'
+  mcp-oidc-audience:
+    description: 'Audience claim requested when minting the GitHub Actions OIDC token. Must match the gateway''s configured audience (production default).'
+    required: false
+    default: 'https://presetai.dev'
+  disable-callback:
+    description: 'Disable the per-run callback regardless of available auth. Useful for one-off runs you do not want logged.'
+    required: false
+    default: 'false'
+
+outputs:
+  violations-count:
+    description: 'Total number of violations found'
+  errors-count:
+    description: 'Number of errors found'
+  warnings-count:
+    description: 'Number of warnings found'
+  passed:
+    description: 'Whether the check passed (true/false)'
+  health-score:
+    description: 'Overall health score (0-100, empty if not enabled)'
+  health-grade:
+    description: 'Health score grade (A-F, empty if not enabled)'
+  health-delta:
+    description: 'Score change from previous snapshot (empty if no history)'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

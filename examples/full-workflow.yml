@@ -1,0 +1,28 @@
+# Full Preset Design System Check
+# Validates against your team's custom rules from the Preset database.
+# Requires Supabase credentials set as GitHub repository secrets.
+
+name: Design System Check
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preset-check:
+    name: Preset Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: preset-ai/compliance-check@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          supabase-url: ${{ secrets.PRESET_SUPABASE_URL }}
+          supabase-key: ${{ secrets.PRESET_SUPABASE_KEY }}
+          design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+          # Optional: also fail on warnings
+          # fail-on-warnings: 'true'
