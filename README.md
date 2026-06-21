@@ -4,10 +4,11 @@ Validate PR code against your design system rules in CI. Catches AI slop, hardco
 
 ## Quick Setup
 
-The fastest way to add Preset CI to your project:
+The fastest way to add Preset CI to your project. Install the Preset CLI (a standalone binary, no npm), then generate the workflow:
 
 ```bash
-npx preset ci init
+curl -fsSL https://presetai.dev/install.sh | sh
+preset ci init
 ```
 
 This generates a `.github/workflows/preset.yml` configured for your project. See [CLI Setup](#cli-setup) for details.
@@ -265,20 +266,20 @@ Requires `security-events: write` permission.
 
 ## CLI Setup
 
-The Preset CLI can generate the workflow file for you:
+The Preset CLI (a standalone binary; install with `curl -fsSL https://presetai.dev/install.sh | sh`) can generate the workflow file for you:
 
 ```bash
 # Interactive setup
-npx preset ci init
+preset ci init
 
 # Non-interactive with auto-detection
-npx preset ci init --yes
+preset ci init --yes
 
 # Preview without writing
-npx preset ci init --dry-run
+preset ci init --dry-run
 
 # With specific options
-npx preset ci init --fail-on-warnings --score-threshold 70 --sarif
+preset ci init --fail-on-warnings --score-threshold 70 --sarif
 ```
 
 The CLI is also offered during `preset init` and `preset setup` flows.
