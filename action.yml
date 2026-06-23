@@ -38,6 +38,10 @@ inputs:
     description: 'Run static composition-conformance checks (forbidden Card>Card, max-depth, no-arbitrary-spacing) against changed JSX/TSX files. PRE-1484 first slice.'
     required: false
     default: 'false'
+  apply-fixes:
+    description: 'Auto-apply high-confidence, non-breaking design-system codemods to changed JSX/TSX files and commit them back to the PR branch. Opt-in (PRE-1933). Requires the workflow to grant `permissions: contents: write`. Skipped for fork PRs (the token cannot push to a fork branch).'
+    required: false
+    default: 'false'
   fail-on-warnings:
     description: 'Fail the check if warnings are found'
     required: false
