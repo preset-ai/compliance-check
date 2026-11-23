@@ -57,32 +57,109 @@ Runs `afterGeneration()` from `@preset/core`. Catches:
 - AI slop patterns (generic gradients, excessive shadows, emojis, Lorem ipsum)
 - Arbitrary spacing values
 
-### Full (when Supabase credentials provided)
+### Full (when `design-system-id` is set)
 
-Also runs `DesignSystemValidator` from `@preset/mcp` against your team's actual database rules:
+Also checks each changed file against your design system's own rules:
 - Forbidden primitives
 - Context rule violations
 - Pattern compliance
 - Intent route mismatches
 - Token usage (hardcoded hex → semantic token)
 
+Full mode runs through the preset AI gateway. The Action signs in with a GitHub
+OIDC token minted for the run, so no secret is stored in your repository. You
+need the [preset AI GitHub App](https://github.com/apps/preset-ai) installed on the
+repository and bound to your design system, and `permissions: id-token: write`
+on the job:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: preset-ai/compliance-check@v1
+    with:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+      design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+```
+
+If your runner can't grant `id-token: write`, pass `preset-api-key` instead.
+Checking needs `author` scope: for the GitHub App, ask preset AI to enable it
+for your installation; for an API key, use a Standard key.
+
+`design-system-id` must be the design system your credential is bound to. The
+gateway always checks against the bound one, so the Action fails the run when
+the two differ rather than report results for a design system you didn't name.
+
+### How the mode is chosen
+
+| `design-system-id` | `supabase-url` / `supabase-key` | Mode |
+|---|---|---|
+| not set | anything | Basic |
+| set | neither | Full, through the preset AI gateway |
+| set | both | Full, reading Supabase directly (deprecated, see below) |
+| set | only one | Configuration error: the check fails |
+
+In full mode through the gateway, the check fails if the gateway can't be
+reached, rejects the credential, has used up its monthly allowance, or returns
+a result the Action can't read. It never falls back to basic mode, because a
+run that couldn't check your rules isn't a pass. Short rate limits are waited
+out (up to 5 minutes per run). These checks run even when no relevant file
+changed, so a broken setup shows up on the next PR.
+
+### Deprecated: `supabase-url` and `supabase-key`
+
+Setting both still reads your design system directly with the Supabase key,
+and the Action warns on every run. An anonymous key can't read a private
+design system (the default), so in that setup full mode checks nothing against
+your rules and fails on unchecked files (below). Remove both inputs to use the
+gateway. They will be removed in a future major version. Health scoring still
+needs them for now.
+
+### Full mode and unchecked files
+
+When full mode is configured, the Action checks whether your design system's own
+rules actually applied to each changed file. If one or more changed files had no
+binding rule behind them at all (the `unchecked-files` output is non-zero), the
+check fails by default, even if no violations were found. A run that checked
+nothing against your own rules is not a compliance pass.
+
+This most often means one of two things:
+
+- `design-system-id` points at a design system with no rules at warn or block
+  for these files yet.
+- You use the deprecated `supabase-key`, which can't read a private design
+  system. Switch to the gateway (above).
+
+If you want the Action to keep running without failing on this (for example,
+while your design system intentionally has no rules yet), set
+`allow-unchecked: true`:
+
 ```yaml
 - uses: preset-ai/compliance-check@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
-    supabase-url: ${{ secrets.PRESET_SUPABASE_URL }}
-    supabase-key: ${{ secrets.PRESET_SUPABASE_KEY }}
     design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+    allow-unchecked: 'true'
 ```
+
+`allow-unchecked` accepts "rules checked, none bound". It does not cover a
+gateway failure, which always fails the check.
+
+This has no effect in basic mode: basic mode never ran against a design system
+in the first place, so it never fails on this.
 
 ## Inputs
 
 | Input | Required | Default | Description |
 |-------|:--------:|---------|-------------|
 | `github-token` | no | `${{ github.token }}` | Token for PR comments and annotations |
-| `supabase-url` | no | — | Supabase project URL (enables full validation) |
-| `supabase-key` | no | — | Supabase anon key |
-| `design-system-id` | no | — | Design system UUID |
+| `supabase-url` | no | — | Deprecated. With `supabase-key`, reads the design system directly instead of through the gateway |
+| `supabase-key` | no | — | Deprecated. Supabase anon key; cannot read a private design system |
+| `design-system-id` | no | — | Design system UUID. Turns on full mode; must match the design system your credential is bound to |
 | `layer-id` | no | — | Optional layer for multi-layer systems |
 | `include` | no | `**/*.{tsx,jsx,ts,vue,svelte}` | Comma-separated globs for files to check |
 | `exclude` | no | `**/node_modules/**` | Comma-separated globs for files to skip |
@@ -93,10 +170,11 @@ Also runs `DesignSystemValidator` from `@preset/mcp` against your team's actual 
 | `score-threshold` | no | `0` | Minimum health score to pass (0-100, 0 = disabled) |
 | `regression-threshold` | no | `0` | Max allowed score drop from previous snapshot (0 = disabled) |
 | `fail-on-new-only` | no | `false` | Only fail on new violations not in baseline |
-| `preset-api-key` | no | — | Legacy fallback for the per-run callback. With the [Preset GitHub App](#authenticating-the-callback) installed and `permissions: id-token: write` set, no key is needed. |
+| `preset-api-key` | no | — | Legacy fallback for the per-run callback. With the [preset AI GitHub App](#authenticating-the-callback) installed and `permissions: id-token: write` set, no key is needed. |
 | `mcp-gateway-url` | no | `https://mcp.presetai.dev` | Override base URL for the callback target (e.g., self-hosted gateway) |
 | `mcp-oidc-audience` | no | `https://presetai.dev` | Audience claim requested when minting the OIDC token. Override only for staging/self-hosted gateways. |
 | `disable-callback` | no | `false` | Disable callback regardless of available auth |
+| `allow-unchecked` | no | `false` | In full mode, accept a run where none of your design system's binding rules applied to any changed file instead of failing it. See [Full mode and unchecked files](#full-mode-and-unchecked-files). |
 
 ## Outputs
 
@@ -106,6 +184,7 @@ Also runs `DesignSystemValidator` from `@preset/mcp` against your team's actual 
 | `errors-count` | Number of errors |
 | `warnings-count` | Number of warnings |
 | `passed` | Whether the check passed (`true`/`false`) |
+| `unchecked-files` | Number of changed files checked against zero binding design system rules. See [Full mode and unchecked files](#full-mode-and-unchecked-files). |
 | `health-score` | Overall health score (0-100, empty if not enabled) |
 | `health-grade` | Health score grade (A-F, empty if not enabled) |
 | `health-delta` | Score change from previous snapshot (empty if no history) |
@@ -169,8 +248,10 @@ After each run, the Action sends a single non-blocking request to your Preset wo
 
 The recommended path uses GitHub Actions OIDC — no secret in repo settings.
 
-1. Install the [Preset GitHub App](https://github.com/apps/preset-ai) on your org or selected repos. Pick which design system the install binds to during the bind flow on `app.presetai.dev`.
-2. Grant the workflow the `id-token: write` permission and `design-system-id` for the bound DS. The Action mints a fresh OIDC token per run, scoped to your repo and the configured audience.
+1. Install the [preset AI GitHub App](https://github.com/apps/preset-ai) on your org or selected repos. Pick which design system the install binds to during the bind flow on `app.presetai.dev`.
+2. Grant the workflow the `id-token: write` permission and `design-system-id` for the bound DS. The Action mints a fresh OIDC token per run, scoped to your repo and the configured audience. The same token is used for [full mode](#full-when-design-system-id-is-set).
+
+> **Checking and result reporting need `author` scope.** An OIDC-authenticated installation defaults to `read`, which can neither run full-mode checks nor report results back: full mode fails with a message naming author scope, and the callback is refused with a 403 that explains why. There's no self-serve toggle for this yet: ask preset AI to enable `author` scope for your installation.
 
 ```yaml
 permissions:
@@ -208,7 +289,7 @@ The Action prefers OIDC when both are configured. If the OIDC mint fails (no per
 One row per Action invocation, written to `agent_validation_outcome` in your workspace:
 
 - **Run identity:** `trigger`, `outcome` (`pass` / `fail` / `skip`), `repo`, `run_id`, `run_attempt`, `check_run_id`, `commit_sha`, `commit_author_id`
-- **Override flags:** your `fail-on-errors`, `fail-on-warnings`, `fail-on-new-only`, `score-threshold`, and `regression-threshold` values for that run
+- **Override flags:** your `fail-on-errors`, `fail-on-warnings`, `fail-on-new-only`, `score-threshold`, `regression-threshold`, and `allow-unchecked` values for that run
 - **`.presetrc` state:** `presetrc_loaded` (boolean) and `presetrc_contents` filtered to a 7-field allowlist (see below)
 - **Violation summary:** counts only: `{ errors, warnings, info }`
 - **Run metadata:** `duration_ms`, `action_version`
@@ -314,4 +395,21 @@ The action only validates files changed in the PR with design-system-relevant ex
 
 ### Health score not appearing
 
-Health scoring requires full mode (Supabase credentials) and at least one threshold enabled (`score-threshold` > 0 or `regression-threshold` > 0).
+Health scoring still requires the deprecated Supabase inputs (`supabase-url`, `supabase-key`, `design-system-id`) and at least one threshold enabled (`score-threshold` > 0 or `regression-threshold` > 0). Moving it to the gateway is planned.
+
+### Check fails with "no binding design system rules applied"
+
+See [Full mode and unchecked files](#full-mode-and-unchecked-files). Check `design-system-id` (and stop using `supabase-key` if you still do), or set `allow-unchecked: true` if this is expected.
+
+### Check fails with "the preset AI gateway could not check this run"
+
+The error line above it says why. The usual causes:
+
+- **No credential.** Add `permissions: id-token: write` to the job, or set `preset-api-key`.
+- **`design-system-id` does not match.** The message names both design systems. Use the id of the design system your GitHub App installation or API key is bound to.
+- **Missing author scope.** The message names it. See [Authenticating the callback](#authenticating-the-callback).
+- **Monthly allowance used up.** The message includes the gateway's hint.
+
+### Check fails with "Design system check misconfigured"
+
+You set one of `supabase-url` and `supabase-key` but not the other. Remove both to use the gateway (recommended), or set both.

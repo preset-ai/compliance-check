@@ -1,6 +1,6 @@
 name: 'Preset Design System Check'
 description: 'Validate PR code against your design system rules — AI slop detection, forbidden primitives, token misuse, and more'
-author: 'preset.dev'
+author: 'presetai.dev'
 branding:
   icon: 'check-circle'
   color: 'gray-dark'
@@ -11,13 +11,13 @@ inputs:
     required: false
     default: ${{ github.token }}
   supabase-url:
-    description: 'Supabase project URL (enables full DB validation)'
+    description: 'DEPRECATED. With supabase-key, full mode reads the design system directly instead of through the preset AI gateway. An anonymous key cannot read a private design system. Remove both to use the gateway (PRE-2873).'
     required: false
   supabase-key:
-    description: 'Supabase anon key'
+    description: 'DEPRECATED. Supabase anon key for the direct mode described under supabase-url.'
     required: false
   design-system-id:
-    description: 'Design system UUID'
+    description: 'Design system UUID. Turns on full mode, which checks changed files against this design system through the preset AI gateway (GitHub OIDC with id-token: write, or preset-api-key). Must be the design system the credential is bound to; a mismatch fails the run.'
     required: false
   layer-id:
     description: 'Optional layer ID for multi-layer design systems'
@@ -67,10 +67,10 @@ inputs:
     required: false
     default: 'false'
   preset-api-key:
-    description: 'Preset API key (pk_live_* or pk_test_*). Legacy fallback used only when OIDC is unavailable. With the Preset GitHub App installed and `permissions: id-token: write` set on the workflow, no key is needed. See README "Authentication" for the recommended OIDC path.'
+    description: 'Preset API key (pk_live_* or pk_test_*). Fallback for full mode and the callback, used only when OIDC is unavailable. With the preset AI GitHub App installed and `permissions: id-token: write` set on the workflow, no key is needed. See README "Authentication" for the recommended OIDC path.'
     required: false
   mcp-gateway-url:
-    description: 'Override base URL for the MCP gateway (callback target). Defaults to the production endpoint.'
+    description: 'Override base URL for the preset AI gateway. Full mode uses <base>/mcp and the callback <base>/v1/agent-events. Defaults to the production endpoint.'
     required: false
     default: 'https://mcp.presetai.dev'
   mcp-oidc-audience:
@@ -79,6 +79,10 @@ inputs:
     default: 'https://presetai.dev'
   disable-callback:
     description: 'Disable the per-run callback regardless of available auth. Useful for one-off runs you do not want logged.'
+    required: false
+    default: 'false'
+  allow-unchecked:
+    description: 'When full mode is configured (design-system-id set) but none of your design system''s binding rules applied to a changed file, the check fails by default (PRE-2873): a run that checked nothing against your own rules is not a compliance pass. Set this to true to accept that run instead of failing it. Does not cover a gateway failure, which always fails. Has no effect in basic mode.'
     required: false
     default: 'false'
 
@@ -91,6 +95,8 @@ outputs:
     description: 'Number of warnings found'
   passed:
     description: 'Whether the check passed (true/false)'
+  unchecked-files:
+    description: 'Files checked against zero binding design system rules (none at warn/block). Non-zero with no violations is NOT a compliance pass. In full mode, a non-zero value fails the check unless allow-unchecked is true (PRE-2873).'
   health-score:
     description: 'Overall health score (0-100, empty if not enabled)'
   health-grade:
