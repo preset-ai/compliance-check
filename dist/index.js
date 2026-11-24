@@ -95309,7 +95309,7 @@ module.exports = {
 
 /***/ }),
 
-/***/ 26224:
+/***/ 73523:
 /***/ ((__unused_webpack_module, __unused_webpack___webpack_exports__, __nccwpck_require__) => {
 
 "use strict";
@@ -98269,74 +98269,6 @@ function getIDToken(aud) {
  */
 
 //# sourceMappingURL=core.js.map
-// EXTERNAL MODULE: external "node:fs"
-var external_node_fs_ = __nccwpck_require__(73024);
-// EXTERNAL MODULE: external "node:path"
-var external_node_path_ = __nccwpck_require__(76760);
-;// CONCATENATED MODULE: ./src/config.ts
-/**
- * Configuration parser for the Preset GitHub Action (PRE-329).
- *
- * Merges action inputs (from action.yml) with optional .presetrc file.
- */
-
-
-
-function loadPresetRc() {
-    const rcPath = external_node_path_.resolve(process.cwd(), '.presetrc');
-    if (!external_node_fs_.existsSync(rcPath))
-        return null;
-    try {
-        const raw = external_node_fs_.readFileSync(rcPath, 'utf-8');
-        return JSON.parse(raw);
-    }
-    catch (e) {
-        warning(`.presetrc found but could not be parsed: ${e}`);
-        return null;
-    }
-}
-function parseConfig() {
-    const rc = loadPresetRc();
-    const includeInput = getInput('include');
-    const excludeInput = getInput('exclude');
-    const include = rc?.include
-        ?? (includeInput ? includeInput.split(',').map(s => s.trim()) : ['**/*.tsx', '**/*.jsx', '**/*.ts', '**/*.vue', '**/*.svelte']);
-    const exclude = rc?.exclude
-        ?? (excludeInput ? excludeInput.split(',').map(s => s.trim()) : ['**/node_modules/**']);
-    return {
-        githubToken: getInput('github-token') || process.env.GITHUB_TOKEN || '',
-        supabaseUrl: getInput('supabase-url') || undefined,
-        supabaseKey: getInput('supabase-key') || undefined,
-        designSystemId: getInput('design-system-id') || undefined,
-        layerId: getInput('layer-id') || undefined,
-        include,
-        exclude,
-        failOnErrors: rc?.failOnErrors ?? getInput('fail-on-errors') !== 'false',
-        failOnWarnings: rc?.failOnWarnings ?? getInput('fail-on-warnings') === 'true',
-        compositionChecks: rc?.compositionChecks ?? getInput('composition-checks') === 'true',
-        // PRE-1933: opt-in autofix. Action input only (not a .presetrc field) — it's
-        // a CI behavior toggle that mutates the PR branch, kept explicit per-workflow.
-        applyFixes: getInput('apply-fixes') === 'true',
-        commentOnPr: getInput('comment-on-pr') !== 'false',
-        uploadSarif: getInput('upload-sarif') === 'true',
-        scoreThreshold: rc?.scoreThreshold ?? parseInt(getInput('score-threshold') || '0', 10),
-        regressionThreshold: rc?.regressionThreshold ?? parseInt(getInput('regression-threshold') || '0', 10),
-        failOnNewOnly: rc?.failOnNewOnly ?? getInput('fail-on-new-only') === 'true',
-        // PRE-954 + PRE-1186 Stage 3B: per-run callback config. .presetrc
-        // precedence does NOT apply — these are infrastructure config, not
-        // enforcement settings.
-        presetApiKey: getInput('preset-api-key') || '',
-        mcpGatewayUrl: getInput('mcp-gateway-url') || 'https://mcp.presetai.dev',
-        mcpOidcAudience: getInput('mcp-oidc-audience') || 'https://presetai.dev',
-        disableCallback: getInput('disable-callback') === 'true',
-        // PRE-2873: explicit opt-out for the full-mode-with-zero-binding-rules
-        // fail condition. Action input only, like applyFixes and disableCallback
-        // above: a CI behavior toggle, not a design-system enforcement setting,
-        // so .presetrc precedence does not apply.
-        allowUnchecked: getInput('allow-unchecked') === 'true',
-    };
-}
-
 ;// CONCATENATED MODULE: ./node_modules/@actions/github/lib/context.js
 
 
@@ -102655,6 +102587,161 @@ function getOctokit(token, options, ...additionalPlugins) {
     return new GitHubWithPlugins(getOctokitOptions(token, options));
 }
 //# sourceMappingURL=github.js.map
+// EXTERNAL MODULE: external "node:fs"
+var external_node_fs_ = __nccwpck_require__(73024);
+// EXTERNAL MODULE: external "node:path"
+var external_node_path_ = __nccwpck_require__(76760);
+;// CONCATENATED MODULE: ./src/fail-on-errors.ts
+/**
+ * Pure `failOnErrors` precedence (PRE-3040/PRE-3041).
+ *
+ * Split out of config.ts the same way gateway-mode.ts is split out of
+ * gateway-client.ts: config.ts imports `@actions/core`, which makes it
+ * untestable under this package's tsx test runner (CJS-mode module
+ * resolution against @actions/core's ESM-only package.json exports map).
+ * This module has no such import, so the precedence decision is unit
+ * tested directly. `parseConfig()` in config.ts is the only caller, and the
+ * only thing that ever calls `core.warning` with the `warning` this returns.
+ *
+ * Precedence (unchanged core behavior for steps 1 and 2; new: step 3 and the
+ * shadow-precedence warning):
+ *   1. explicit `.presetrc.failOnErrors` (a boolean).
+ *   2. explicit, non-empty `fail-on-errors` workflow input: the SAME lenient
+ *      comparison the Action has always used, `trimmed !== 'false'`, not a
+ *      stricter `=== 'true'`. A non-canonical value like `'True'` keeps
+ *      resolving to `true`, unchanged.
+ *   3. `.presetrc.mode` (`advisory`/`warn` -> false, `enforce` -> true).
+ *   4. hardcoded fallback: `true`.
+ *
+ * Step 3 only controls enforcement live when nothing explicit shadows it.
+ * Every pre-v1.4.0 `preset ci init` output in advisory/warn mode already
+ * commits a literal `fail-on-errors: 'false'` line to the generated
+ * workflow (packages/cli/src/commands/ci.ts), so a customer who later edits
+ * `.presetrc.mode` to `enforce` would otherwise see CI keep silently
+ * passing on real errors, forever, with no signal anywhere that the edit
+ * did nothing. When step 1 or step 2 wins AND a `.presetrc.mode` is also
+ * configured (recognized or not), this returns a warning naming the
+ * shadowed mode and which setting won, meant for `core.warning` on EVERY
+ * run, not only at `preset ci init` time. The warning fires whenever both
+ * are present, agreement or not: the point is visibility that `.presetrc`
+ * mode is doing nothing, not whether that happens to matter this run.
+ *
+ * An unrecognized `.presetrc.mode` value (anything other than advisory,
+ * warn or enforce) is its own, separate warning: it is ignored and the
+ * resolution falls through to the next step, same as `loadPresetRc`'s
+ * JSON-parse-failure handling degrades rather than throws.
+ */
+const MODE_FAILS_ON_ERRORS = {
+    advisory: false,
+    warn: false,
+    enforce: true,
+};
+function isModeValue(v) {
+    return v === 'advisory' || v === 'warn' || v === 'enforce';
+}
+function resolveFailOnErrors(rc, failOnErrorsInput) {
+    const modeRaw = rc?.mode;
+    let modeValue;
+    let unknownModeWarning = null;
+    if (modeRaw !== undefined) {
+        if (isModeValue(modeRaw)) {
+            modeValue = MODE_FAILS_ON_ERRORS[modeRaw];
+        }
+        else {
+            unknownModeWarning = `.presetrc mode "${modeRaw}" is not recognized (expected advisory, warn or enforce). Ignoring it.`;
+        }
+    }
+    const modeConfigured = modeValue !== undefined;
+    if (rc?.failOnErrors !== undefined) {
+        const warning = modeConfigured
+            ? `.presetrc mode is set to "${modeRaw}", but .presetrc failOnErrors is also set explicitly. The explicit failOnErrors value wins and the mode is ignored. Remove failOnErrors from .presetrc to let mode control enforcement.`
+            : unknownModeWarning;
+        return { value: rc.failOnErrors, warning };
+    }
+    const trimmedInput = failOnErrorsInput.trim();
+    if (trimmedInput !== '') {
+        const warning = modeConfigured
+            ? `.presetrc mode is set to "${modeRaw}", but this workflow pins fail-on-errors explicitly; the explicit value wins and the mode is ignored. Remove fail-on-errors from the workflow to let .presetrc control enforcement.`
+            : unknownModeWarning;
+        return { value: trimmedInput !== 'false', warning };
+    }
+    if (modeConfigured) {
+        return { value: modeValue, warning: null };
+    }
+    return { value: true, warning: unknownModeWarning };
+}
+
+;// CONCATENATED MODULE: ./src/config.ts
+/**
+ * Configuration parser for the Preset GitHub Action (PRE-329).
+ *
+ * Merges action inputs (from action.yml) with optional .presetrc file.
+ */
+
+
+
+
+function loadPresetRc() {
+    const rcPath = external_node_path_.resolve(process.cwd(), '.presetrc');
+    if (!external_node_fs_.existsSync(rcPath))
+        return null;
+    try {
+        const raw = external_node_fs_.readFileSync(rcPath, 'utf-8');
+        return JSON.parse(raw);
+    }
+    catch (e) {
+        warning(`.presetrc found but could not be parsed: ${e}`);
+        return null;
+    }
+}
+function parseConfig() {
+    const rc = loadPresetRc();
+    const includeInput = getInput('include');
+    const excludeInput = getInput('exclude');
+    const include = rc?.include
+        ?? (includeInput ? includeInput.split(',').map(s => s.trim()) : ['**/*.tsx', '**/*.jsx', '**/*.ts', '**/*.vue', '**/*.svelte']);
+    const exclude = rc?.exclude
+        ?? (excludeInput ? excludeInput.split(',').map(s => s.trim()) : ['**/node_modules/**']);
+    // PRE-3040/PRE-3041: explicit .presetrc.failOnErrors > explicit fail-on-errors
+    // input > .presetrc.mode > hardcoded default. See fail-on-errors.ts for the
+    // full precedence and the shadow-precedence warning this surfaces.
+    const failOnErrorsResolution = resolveFailOnErrors(rc, getInput('fail-on-errors'));
+    if (failOnErrorsResolution.warning)
+        warning(failOnErrorsResolution.warning);
+    return {
+        githubToken: getInput('github-token') || process.env.GITHUB_TOKEN || '',
+        supabaseUrl: getInput('supabase-url') || undefined,
+        supabaseKey: getInput('supabase-key') || undefined,
+        designSystemId: getInput('design-system-id') || undefined,
+        layerId: getInput('layer-id') || undefined,
+        include,
+        exclude,
+        failOnErrors: failOnErrorsResolution.value,
+        failOnWarnings: rc?.failOnWarnings ?? getInput('fail-on-warnings') === 'true',
+        compositionChecks: rc?.compositionChecks ?? getInput('composition-checks') === 'true',
+        // PRE-1933: opt-in autofix. Action input only (not a .presetrc field) — it's
+        // a CI behavior toggle that mutates the PR branch, kept explicit per-workflow.
+        applyFixes: getInput('apply-fixes') === 'true',
+        commentOnPr: getInput('comment-on-pr') !== 'false',
+        uploadSarif: getInput('upload-sarif') === 'true',
+        scoreThreshold: rc?.scoreThreshold ?? parseInt(getInput('score-threshold') || '0', 10),
+        regressionThreshold: rc?.regressionThreshold ?? parseInt(getInput('regression-threshold') || '0', 10),
+        failOnNewOnly: rc?.failOnNewOnly ?? getInput('fail-on-new-only') === 'true',
+        // PRE-954 + PRE-1186 Stage 3B: per-run callback config. .presetrc
+        // precedence does NOT apply — these are infrastructure config, not
+        // enforcement settings.
+        presetApiKey: getInput('preset-api-key') || '',
+        mcpGatewayUrl: getInput('mcp-gateway-url') || 'https://mcp.presetai.dev',
+        mcpOidcAudience: getInput('mcp-oidc-audience') || 'https://presetai.dev',
+        disableCallback: getInput('disable-callback') === 'true',
+        // PRE-2873: explicit opt-out for the full-mode-with-zero-binding-rules
+        // fail condition. Action input only, like applyFixes and disableCallback
+        // above: a CI behavior toggle, not a design-system enforcement setting,
+        // so .presetrc precedence does not apply.
+        allowUnchecked: getInput('allow-unchecked') === 'true',
+    };
+}
+
 ;// CONCATENATED MODULE: ./node_modules/balanced-match/dist/esm/index.js
 const balanced = (a, b, str) => {
     const ma = a instanceof RegExp ? maybeMatch(a, str) : a;
@@ -151612,6 +151699,19 @@ class StreamableHTTPClientTransport {
     }
 }
 //# sourceMappingURL=streamableHttp.js.map
+;// CONCATENATED MODULE: ./src/version.ts
+/**
+ * Single source for the Action's own version string (PRE-3040/PRE-3041).
+ *
+ * Before this file existed, the version was a literal copied in two places:
+ * `agent-events-callback.ts`'s `action_version` callback field and
+ * `gateway-client.ts`'s MCP `Client({ name, version })` handshake. Both said
+ * '1.3.0' on origin/main. A plan that bumps only one of them ships a release
+ * whose callback payload and MCP handshake disagree about which version is
+ * running. Both now import this constant, so there is one site to bump.
+ */
+const ACTION_VERSION = '1.4.0';
+
 ;// CONCATENATED MODULE: ./src/gateway-client.ts
 /**
  * Gateway full mode client (PRE-2873 step 2): validate changed files through
@@ -151633,6 +151733,7 @@ class StreamableHTTPClientTransport {
 // CJS subpaths on purpose: ncc bundles this Action as CommonJS, and the SDK's
 // `require` condition resolves to its dist/cjs build (PRE-1658 was an ESM build
 // embedded into CJS crashing at load).
+
 
 
 
@@ -151664,11 +151765,31 @@ function jwtExp(jwt) {
     }
 }
 /**
+ * PRE-3040: whether this run has ANY credential it could try (OIDC capable, or
+ * a `preset-api-key` configured), without actually attempting the mint. A
+ * pure yes/no used by `index.ts` to decide the fork/Dependabot generic-only
+ * carve-out before it ever opens a gateway connection. `resolveCredential`
+ * below calls this too, so the two call sites can never disagree about what
+ * "has a credential" means.
+ */
+function credentialAvailable(config, oidcAvailable) {
+    return oidcAvailable() || Boolean(config.presetApiKey);
+}
+/**
  * Resolve the bearer source. OIDC when the runner can mint it; a refused mint
  * falls back to `preset-api-key` when one is configured (both reach the same
  * gateway, so neither is a weaker check). Neither: GatewayFailure.
  */
 async function resolveCredential(config, deps) {
+    // PRE-3040: fail fast, before attempting anything, when there is nothing to
+    // try at all. Behavior-preserving: when oidcAvailable() is true this is
+    // always true too, so the mint attempt below still runs exactly as before;
+    // it only short-circuits the case that used to fall through both branches
+    // to the same "needs a credential" throw at the bottom.
+    if (!credentialAvailable(config, deps.oidcAvailable)) {
+        throw new GatewayFailure('Full mode needs a credential for the preset AI gateway: grant the job `permissions: id-token: write` ' +
+            '(with the preset AI GitHub App installed), or set preset-api-key.');
+    }
     let mintError = null;
     if (deps.oidcAvailable()) {
         let current = null;
@@ -151817,7 +151938,7 @@ async function connectGateway(config, deps) {
     };
     let attempt = null;
     await withRetry(`Could not connect to the preset AI gateway (${endpoint.href})`, async () => {
-        attempt = new Client({ name: 'preset-compliance-check', version: '1.3.0' });
+        attempt = new Client({ name: 'preset-compliance-check', version: ACTION_VERSION });
         const transport = new StreamableHTTPClientTransport(endpoint, { fetch: recordingFetch });
         await attempt.connect(transport);
         client = attempt;
@@ -168071,6 +168192,117 @@ function createAnnotations(result) {
     }
 }
 
+;// CONCATENATED MODULE: ./src/fork-detection.ts
+/**
+ * Pure fork and Dependabot PR detection (PRE-3040).
+ *
+ * Mirrors gateway-mode.ts's contract: no imports from @actions/* or the MCP
+ * SDK, so the decision is unit tested directly. `index.ts` builds the
+ * `ForkContext` shape from `@actions/github`'s `context` via `buildForkContext`
+ * below, and decides the generic-only carve-out via `resolveForkGenericOnly`
+ * and `buildValidateConfig`; all three live here, not as inline index.ts
+ * logic, specifically so the wiring itself is executed by a real test
+ * (fork-detection.test.ts), not only read as index.ts source text.
+ */
+const PR_EVENTS = new Set(['pull_request', 'pull_request_target']);
+const DEPENDABOT_LOGIN = 'dependabot[bot]';
+/**
+ * Why this run is a fork or Dependabot PR, or null when it is neither.
+ *
+ * True only when the event is `pull_request`/`pull_request_target` AND a
+ * `pullRequest` payload is present AND (the author is `dependabot[bot]`, OR
+ * `headRepoFullName` is truthy and differs from `baseRepoFullName`). A
+ * present-but-empty `headRepoFullName` (a deleted fork, or any other falsy
+ * value) returns null rather than reading as a fork: absence never reads as
+ * fork. Deliberate consequence (PRE-3040 review, finding #2): a fork PR whose
+ * source fork is later deleted, then re-checked (a re-run, a re-triggered
+ * workflow, or a later push), reports `head.repo` as absent on the live
+ * payload and is therefore treated as same-repo-equivalent here. If that run
+ * still has no credential, it hard-fails through the ordinary
+ * `GatewayFailure('...needs a credential...')` path, NOT the lenient
+ * fork/Dependabot generic-only carve-out. This fails closed (never a false
+ * "generic checks only" pass), so it is not a correctness bug, but it is a
+ * real surprise worth naming here and in the PR comment copy: a deleted-fork
+ * PR reads as a configuration error, not as the fork notice its own history
+ * would suggest.
+ *
+ * Dependabot is checked first and wins the reason when both conditions hold
+ * (a Dependabot PR targeting a repo via a fork-shaped head is still reported
+ * as "dependabot", the more specific and more actionable reason).
+ */
+function forkOrDependabotReason(ctx, baseRepoFullName) {
+    if (!PR_EVENTS.has(ctx.eventName))
+        return null;
+    const pr = ctx.pullRequest;
+    if (!pr)
+        return null;
+    if (pr.userLogin === DEPENDABOT_LOGIN)
+        return 'dependabot';
+    if (pr.headRepoFullName && pr.headRepoFullName !== baseRepoFullName)
+        return 'fork';
+    return null;
+}
+/**
+ * Build a `ForkContext` from the raw `github.context` shape (PRE-3040).
+ *
+ * This is the exact mapping index.ts used to build inline before being
+ * passed to `forkOrDependabotReason`. Moved here so a wrong field path (for
+ * example reading `pullRequest.repo.full_name` instead of
+ * `pullRequest.head.repo.full_name`) is caught by a real executed test
+ * instead of only by production behavior.
+ */
+function buildForkContext(eventName, pullRequest) {
+    return {
+        eventName,
+        pullRequest: pullRequest
+            ? { headRepoFullName: pullRequest.head?.repo?.full_name, userLogin: pullRequest.user?.login }
+            : undefined,
+    };
+}
+/**
+ * Decide whether this run gets the fork/Dependabot generic-only carve-out:
+ * only when a fork/Dependabot reason was detected AND no credential is
+ * available. Replaces index.ts's inline `if (reason && noCredential)` so the
+ * branch condition itself is exercised by a real test; an inverted boolean
+ * here would silently flip which runs get the generic-only carve-out and
+ * which get the ordinary gateway hard-fail (PRE-3040 review, finding #1).
+ */
+function resolveForkGenericOnly(reason, noCredential) {
+    return reason && noCredential ? { reason } : null;
+}
+/**
+ * The config passed to `validateFiles` for THIS call, given whether the run
+ * is fork/Dependabot generic-only.
+ *
+ * A generic-only run clears `designSystemId`/`supabaseUrl`/`supabaseKey` so
+ * `validateFiles`'s own `resolveValidationMode` genuinely resolves `basic`
+ * for it. Every other caller (including `evaluateUncheckedGate`) keeps using
+ * the ORIGINAL config, with `designSystemId` still set. Extracted out of
+ * index.ts's inline ternary so a swapped branch, checking a fork PR against
+ * the full design system it has no credential to read, or silently skipping
+ * the check on an ordinary same-repo run, is caught by a real executed test
+ * (PRE-3040 review, finding #4), not only by reading index.ts's source text.
+ */
+function buildValidateConfig(config, forkGenericOnly) {
+    return forkGenericOnly ? { ...config, designSystemId: undefined, supabaseUrl: undefined, supabaseKey: undefined } : config;
+}
+/** Whether this run is a fork or Dependabot PR. See `forkOrDependabotReason` for which one. */
+function isForkOrDependabotPR(ctx, baseRepoFullName) {
+    return forkOrDependabotReason(ctx, baseRepoFullName) !== null;
+}
+const NOTICES = {
+    fork: "Fork pull request: checked against generic rules only, because forks can't read repository secrets.",
+    dependabot: "Dependabot pull request: checked against generic rules only, because Dependabot can't read repository secrets.",
+};
+/**
+ * The exact notice text for a reason (PRE-3040 pinned decision), single-
+ * sourced so the Action log line and the PR comment's lead sentence can never
+ * drift apart.
+ */
+function forkOrDependabotNotice(reason) {
+    return NOTICES[reason];
+}
+
 ;// CONCATENATED MODULE: ./src/comment-markdown.ts
 /**
  * Pure markdown generation for the PR comment (PRE-2665).
@@ -168083,6 +168315,7 @@ function createAnnotations(result) {
  * itself (badge said "Passed with 0 warnings" while the section below said
  * "Violations (N)"), and no test could have caught it from here.
  */
+
 
 const COMMENT_MARKER = '<!-- preset-design-system-check -->';
 const MAX_INLINE_VIOLATIONS = 30;
@@ -168135,6 +168368,30 @@ function joinParts(parts) {
     return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
 /**
+ * "found **N errors** and **M warnings**" (or just the warnings clause when
+ * there are no errors). Shared by the ordinary failed-run banner and the
+ * PRE-3040 forkGenericOnly banner's own failure clause, so the two can never
+ * phrase the same count differently.
+ */
+function errorWarningClause(result) {
+    return result.errors > 0
+        ? `found **${result.errors} error${result.errors !== 1 ? 's' : ''}** and **${result.warnings} warning${result.warnings !== 1 ? 's' : ''}**`
+        : `found **${result.warnings} warning${result.warnings !== 1 ? 's' : ''}**`;
+}
+/**
+ * PRE-3040: render a fork/Dependabot notice as "> **<lead>:** <rest>", bold
+ * on the label only (the first colon-delimited clause) rather than the
+ * whole sentence. `forkOrDependabotNotice` is the single source of the text
+ * itself (shared with the Action log line in index.ts); this only adds the
+ * markdown emphasis for the PR comment.
+ */
+function noticeBanner(notice) {
+    const colon = notice.indexOf(':');
+    if (colon === -1)
+        return `> **${notice}**`;
+    return `> **${notice.slice(0, colon + 1)}**${notice.slice(colon + 1)}`;
+}
+/**
  * Trailing clause naming advisory findings on a FAILED run (PRE-2665). They did
  * not cause the failure and must not read as though they did, so they are
  * appended as context rather than folded into the failure count.
@@ -168164,7 +168421,32 @@ function generateMarkdown(result) {
     // reason, never folded into `passed`: a clean core-defaults result must not
     // read "All checks passed" when the design system's own rules never ran.
     const gatewayFailure = result.gatewayFailure;
-    if (result.passed && !uncheckedGateFailed && !gatewayFailure) {
+    if (result.forkGenericOnly) {
+        // PRE-3040: replace ONLY the lead sentence (what would otherwise be
+        // "All checks passed"/"Passed with N findings" below) with the notice.
+        // A real failure clause still appends underneath, unchanged, whenever
+        // `!result.passed` is independently true (enforce mode tripped by the
+        // generic checks themselves), the pinned interpretation of the plan's
+        // internal contradiction (critique-1 #4). The notice never coexists
+        // with the ordinary pass banner.
+        //
+        // PRE-3040 review (finding #3): `forkGenericOnlyReason` is optional on
+        // `ActionResult` even though `forkGenericOnly` is a plain boolean, so
+        // nothing in the type stops some future caller from setting one without
+        // the other (today's only writer, index.ts, always sets both together).
+        // A non-null assertion here would crash PR-comment generation for the
+        // whole run on that gap; fall back to a reason-less generic notice
+        // instead, so a missing reason degrades gracefully rather than throwing.
+        const notice = result.forkGenericOnlyReason
+            ? forkOrDependabotNotice(result.forkGenericOnlyReason)
+            : 'Checked against generic rules only.';
+        lines.push(noticeBanner(notice));
+        if (!result.passed) {
+            lines.push('> [!CAUTION]');
+            lines.push(`> **Failed:** ${errorWarningClause(result)}.${suggestionSuffix(result)}`);
+        }
+    }
+    else if (result.passed && !uncheckedGateFailed && !gatewayFailure) {
         if (result.errors === 0 && result.warnings === 0 && result.uncheckedFiles > 0) {
             // PRE-2897: no gate-eligible findings, but some files had no binding rules
             // behind them. "All checks passed" (or "Passed with N suggestions") would
@@ -168213,9 +168495,7 @@ function generateMarkdown(result) {
         // errors as a reason it failed (Codex round 2).
         const clauses = [];
         if (!result.passed) {
-            clauses.push(result.errors > 0
-                ? `found **${result.errors} error${result.errors !== 1 ? 's' : ''}** and **${result.warnings} warning${result.warnings !== 1 ? 's' : ''}**`
-                : `found **${result.warnings} warning${result.warnings !== 1 ? 's' : ''}**`);
+            clauses.push(errorWarningClause(result));
         }
         if (gatewayFailure) {
             clauses.push(`the preset AI gateway could not check this run against your design system (${gatewayFailure})`);
@@ -184267,6 +184547,8 @@ async function getBaselineCompare(config, currentSnapshotId) {
  *
  * No imports from @actions/* or any side-effect-bearing module.
  */
+
+
 /**
  * Resolve the `Authorization` header for the per-run callback (PRE-1186
  * Stage 3B).
@@ -184394,6 +184676,16 @@ function deriveOutcome(_config, result, failReasonsLength) {
     // fail = action will block (or has blocked) the PR. setFailed has fired.
     if (failReasonsLength > 0)
         return 'fail';
+    // PRE-3040: a fork/Dependabot PR with no credential ran generic checks
+    // only. This branch is UNREACHABLE today: `fireAgentEventsCallback`'s own
+    // auth gate (`resolveAuthHeader`, same two credential sources this result's
+    // `forkGenericOnly` is itself gated on via `credentialAvailable`) always
+    // returns before `deriveOutcome` is ever called for such a run: a
+    // credential-less fork/Dependabot run never reaches here. Kept as cheap,
+    // correct, future-proofing in case the callback is ever changed to fire
+    // without a credential; not observable in the dashboard today.
+    if (result.forkGenericOnly)
+        return 'skip';
     // PRE-2665: gate-eligible violations only. `totalViolations` now includes
     // advisory findings, and `skip` means "an override prevented enforcement" —
     // so counting advice here reported an advisory-only run as an enforcement
@@ -184404,6 +184696,101 @@ function deriveOutcome(_config, result, failReasonsLength) {
     if (hadViolations)
         return 'skip';
     return 'pass';
+}
+// PRE-1395: cap per-callback violation detail to keep the POST body bounded.
+// Large DSes can emit thousands of violations; the parent outcome row's
+// violation_summary still records the true totals, so capping the detail
+// stream costs the Sentinel adapter some long-tail signal but never loses
+// the headline counts. 500 covers the head of realistic workloads; raise
+// (or paginate) if dogfood ever surfaces a real ceiling-hit case.
+const MAX_VIOLATION_DETAIL = 500;
+/**
+ * Build the per-run callback payload (PRE-954 + PRE-1186 Stage 3B).
+ *
+ * Pure: no `@actions/*` imports, so it is unit tested directly, the same
+ * split as every other helper in this file. Extracted out of
+ * `fireAgentEventsCallback`'s inline object literal specifically so
+ * `action_version` (and every other field) is proven by a real executed
+ * test reading the BUILT payload, not only by re-stating the `ACTION_VERSION`
+ * import (PRE-3040 review, finding #6): a release that hardcodes a stale
+ * version string here, instead of using the import, is caught by
+ * `gateway-client.test.ts`'s sibling assertion on the MCP handshake AND by
+ * this module's own test asserting the built payload's `action_version`
+ * against the same single-sourced constant.
+ */
+function buildAgentEventPayload(input) {
+    const { config, result, failReasonsLength, fixesApplied, rulesApplied, startTime, now, presetrc } = input;
+    // PRE-1395: flatten per-violation detail from result.fileViolations. The
+    // raw shape (FileViolation[] with nested ActionViolation[]) is awkward for
+    // bulk insert; flatten to (rule, severity, file, line, message) tuples.
+    // Cap at MAX_VIOLATION_DETAIL; the truncation flag tells the server-side
+    // persistence layer (and downstream dashboards) that the headline counts
+    // in violation_summary may exceed what the detail array represents.
+    const flatViolations = [];
+    let truncated = false;
+    outer: for (const fileViolation of result.fileViolations) {
+        for (const v of fileViolation.violations) {
+            if (flatViolations.length >= MAX_VIOLATION_DETAIL) {
+                truncated = true;
+                break outer;
+            }
+            flatViolations.push({
+                rule_id: v.ruleId || v.rule,
+                severity: callbackSeverity(v.severity),
+                file: fileViolation.path,
+                line: v.line,
+                message: v.found,
+            });
+        }
+    }
+    return {
+        trigger: 'gh-action',
+        design_system_id: config.designSystemId,
+        outcome: deriveOutcome(config, result, failReasonsLength),
+        repo: input.repo,
+        run_id: input.runId,
+        run_attempt: input.runAttempt,
+        check_run_id: input.checkRunId,
+        commit_sha: input.commitSha,
+        commit_author_id: input.commitAuthorId,
+        // PRE-1418: PR identity (PR triggers carry pull_request; fall back to the
+        // pushed ref for push triggers).
+        pr_number: input.prNumber,
+        branch: input.branch,
+        override_flags: {
+            fail_on_errors: config.failOnErrors,
+            fail_on_warnings: config.failOnWarnings,
+            fail_on_new_only: config.failOnNewOnly,
+            score_threshold: config.scoreThreshold,
+            regression_threshold: config.regressionThreshold,
+            // PRE-2873 (Codex review round 3): allow-unchecked is a sixth soft-mode
+            // lever, same shape as the five above. Without it in the bypass audit
+            // trail, a deliberate "accept this run with no design-system coverage"
+            // read identically to a basic-mode run that never had a design system
+            // to check in the first place.
+            allow_unchecked: config.allowUnchecked,
+        },
+        presetrc_loaded: presetrc !== null,
+        presetrc_contents: filterPresetRc(presetrc),
+        violation_summary: {
+            errors: result.errors,
+            warnings: result.warnings,
+            info: result.suggestions, // PRE-2665: advisory findings, no longer hardcoded 0
+            // PRE-2897: outcome stays 'pass' when nothing failed (a fourth outcome needs
+            // a coordinated gateway + CHECK + Action release). These let a compliance
+            // metric exclude runs that had no binding rules behind them.
+            files_checked: result.filesChecked,
+            unchecked_files: result.uncheckedFiles,
+        },
+        violation_detail: flatViolations,
+        violation_detail_truncated: truncated,
+        duration_ms: now - startTime,
+        action_version: ACTION_VERSION,
+        // PRE-1933: only present when apply-fixes committed something, so the
+        // gateway's emit gate (fixes_applied > 0) reads naturally.
+        ...(fixesApplied > 0 ? { fixes_applied: fixesApplied } : {}),
+        ...(rulesApplied.length > 0 ? { rules_applied: rulesApplied } : {}),
+    };
 }
 
 ;// CONCATENATED MODULE: ./src/agent-events-callback.ts
@@ -184435,25 +184822,17 @@ function deriveOutcome(_config, result, failReasonsLength) {
 
 
 
-
 // Re-export so any existing import from this module's prior public surface
 // continues to work, and so the M2 reviewer's mental model ("these helpers
 // live with the callback") stays intact at the file boundary.
 
 const CALLBACK_TIMEOUT_MS = 3000;
-const ACTION_VERSION = '1.3.0'; // PRE-2873: gateway mode (OIDC or preset-api-key) replaces silent basic mode; bumped on the action-v1.3.0 publish
-// PRE-1395: cap per-callback violation detail to keep the POST body bounded.
-// Large DSes can emit thousands of violations; the parent outcome row's
-// violation_summary still records the true totals, so capping the detail
-// stream costs the Sentinel adapter some long-tail signal but never loses
-// the headline counts. 500 covers the head of realistic workloads; raise
-// (or paginate) if dogfood ever surfaces a real ceiling-hit case.
-const MAX_VIOLATION_DETAIL = 500;
-// Pure helpers (deriveOutcome, filterPresetRc) live in
-// ./agent-events-callback-helpers.ts so tests can import them without
+// Pure helpers (deriveOutcome, filterPresetRc, buildAgentEventPayload) live
+// in ./agent-events-callback-helpers.ts so tests can import them without
 // pulling @actions/core + @actions/github (which would force a workspace
 // install in the test environment). Mirrors the server-side
-// agent-events-helpers.ts split.
+// agent-events-helpers.ts split. This module's own job, below, is only the
+// @actions/github context reads and the actual network I/O.
 /**
  * Fire the callback. Returns a Promise that resolves regardless of success
  * (so the caller can `await` without risk of throwing). Logs warnings on
@@ -184501,78 +184880,34 @@ fixesApplied = 0, rulesApplied = []) {
     // read the env var directly. Default to 1 (pre-rerun behavior) if unset.
     const runAttempt = parseInt(process.env.GITHUB_RUN_ATTEMPT || '1', 10) || 1;
     const presetrc = loadPresetRc();
-    // PRE-1395: flatten per-violation detail from result.fileViolations. The
-    // raw shape (FileViolation[] with nested ActionViolation[]) is awkward for
-    // bulk insert; flatten to (rule, severity, file, line, message) tuples.
-    // Cap at MAX_VIOLATION_DETAIL — the truncation flag tells the server-side
-    // persistence layer (and downstream dashboards) that the headline counts
-    // in violation_summary may exceed what the detail array represents.
-    const flatViolations = [];
-    let truncated = false;
-    outer: for (const fileViolation of result.fileViolations) {
-        for (const v of fileViolation.violations) {
-            if (flatViolations.length >= MAX_VIOLATION_DETAIL) {
-                truncated = true;
-                break outer;
-            }
-            flatViolations.push({
-                rule_id: v.ruleId || v.rule,
-                severity: callbackSeverity(v.severity),
-                file: fileViolation.path,
-                line: v.line,
-                message: v.found,
-            });
-        }
-    }
-    const payload = {
-        trigger: 'gh-action',
-        design_system_id: config.designSystemId,
-        outcome: deriveOutcome(config, result, failReasonsLength),
+    // PRE-3040 review (finding #6): the payload, including `action_version`,
+    // is built by the pure `buildAgentEventPayload` (agent-events-callback-
+    // helpers.ts) so it is proven by a real executed test reading the BUILT
+    // object, not only by this module re-stating the `ACTION_VERSION` import.
+    // Everything passed in here is an @actions/github context read or an
+    // argument this function already received; the helper itself has no
+    // @actions/* import.
+    const payload = buildAgentEventPayload({
+        config,
+        result,
+        failReasonsLength,
+        fixesApplied,
+        rulesApplied,
+        startTime,
+        now: Date.now(),
+        presetrc,
         repo,
-        run_id: runId,
-        run_attempt: runAttempt,
-        check_run_id: ctx.payload?.check_run?.id ? String(ctx.payload.check_run.id) : undefined,
-        commit_sha: ctx.sha || undefined,
-        commit_author_id: ctx.actor || undefined,
+        runId,
+        runAttempt,
+        checkRunId: ctx.payload?.check_run?.id ? String(ctx.payload.check_run.id) : undefined,
+        commitSha: ctx.sha || undefined,
+        commitAuthorId: ctx.actor || undefined,
         // PRE-1418: PR identity (PR triggers carry pull_request; fall back to the
         // pushed ref for push triggers).
-        pr_number: ctx.payload?.pull_request?.number ?? undefined,
+        prNumber: ctx.payload?.pull_request?.number ?? undefined,
         branch: ctx.payload?.pull_request?.head?.ref ??
             (ctx.ref ? ctx.ref.replace(/^refs\/heads\//, '') : undefined),
-        override_flags: {
-            fail_on_errors: config.failOnErrors,
-            fail_on_warnings: config.failOnWarnings,
-            fail_on_new_only: config.failOnNewOnly,
-            score_threshold: config.scoreThreshold,
-            regression_threshold: config.regressionThreshold,
-            // PRE-2873 (Codex review round 3): allow-unchecked is a sixth soft-mode
-            // lever, same shape as the five above. Without it in the bypass audit
-            // trail, a deliberate "accept this run with no design-system coverage"
-            // read identically to a basic-mode run that never had a design system
-            // to check in the first place.
-            allow_unchecked: config.allowUnchecked,
-        },
-        presetrc_loaded: presetrc !== null,
-        presetrc_contents: filterPresetRc(presetrc),
-        violation_summary: {
-            errors: result.errors,
-            warnings: result.warnings,
-            info: result.suggestions, // PRE-2665: advisory findings, no longer hardcoded 0
-            // PRE-2897: outcome stays 'pass' when nothing failed (a fourth outcome needs
-            // a coordinated gateway + CHECK + Action release). These let a compliance
-            // metric exclude runs that had no binding rules behind them.
-            files_checked: result.filesChecked,
-            unchecked_files: result.uncheckedFiles,
-        },
-        violation_detail: flatViolations,
-        violation_detail_truncated: truncated,
-        duration_ms: Date.now() - startTime,
-        action_version: ACTION_VERSION,
-        // PRE-1933: only present when apply-fixes committed something, so the
-        // gateway's emit gate (fixes_applied > 0) reads naturally.
-        ...(fixesApplied > 0 ? { fixes_applied: fixesApplied } : {}),
-        ...(rulesApplied.length > 0 ? { rules_applied: rulesApplied } : {}),
-    };
+    });
     // Endpoint: /v1/agent-events under the gateway
     const url = `${config.mcpGatewayUrl.replace(/\/$/, '')}/v1/agent-events`;
     // Fire-and-forget with timeout. Errors are warnings only.
@@ -191289,10 +191624,15 @@ function evaluateUncheckedGate(config, result) {
     // PRE-2873 step 2: when the gateway could not check the run, that failure is
     // the reason and is reported on its own; counting the files it never reached
     // as "no binding rules" would misstate the cause.
+    // PRE-3040: a fork/Dependabot PR with no credential ran generic checks
+    // only. `index.ts` calls this with the ORIGINAL config (designSystemId
+    // still set), so `isFullModeEnabled(config)` alone would not bypass it;
+    // this field is the bypass.
     if (!isFullModeEnabled(config) ||
         result.uncheckedFiles <= 0 ||
         config.allowUnchecked ||
-        result.gatewayFailure) {
+        result.gatewayFailure ||
+        result.forkGenericOnly) {
         return { shouldFail: false, warningMessage: null, failReason: null };
     }
     const plural = result.filesChecked !== 1 ? 's' : '';
@@ -191318,6 +191658,8 @@ function evaluateUncheckedGate(config, result) {
  * - Defaults: @preset/core patterns (always, no credentials needed)
  * - Full: DesignSystemValidator from @preset/mcp (when DB credentials provided)
  */
+
+
 
 
 
@@ -191362,25 +191704,51 @@ async function run() {
     // return, so a misconfigured run fails even when nothing relevant changed.
     let gateway = null;
     let preflightFailure = null;
+    // PRE-3040: a fork or Dependabot PR cannot read repository secrets, so a
+    // missing credential there is not the customer's misconfiguration: it is
+    // what forks and Dependabot always look like. Decided from inputs only,
+    // same discipline as resolveValidationMode: the mode table's other rows
+    // (same-repo PR or any non-PR event with no credential) are UNCHANGED:
+    // they still hard-fail via preflightFailure below, because `reason` is
+    // null for them and the carve-out never applies.
+    let forkGenericOnly = null;
     if (mode === 'gateway') {
-        try {
-            gateway = await connectGateway(config, {
-                fetch: globalThis.fetch,
-                mintIdToken: (audience) => getIDToken(audience),
-                oidcAvailable: () => Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN),
-                sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-                log: (msg) => info(msg),
-            });
-            info(`  Gateway: bound to ${gateway.boundLabel ?? gateway.boundDesignSystemId} via ${gateway.credentialSource === 'oidc' ? 'GitHub OIDC' : 'preset-api-key'}`);
+        const oidcAvailable = () => Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN);
+        const prPayload = github_context.payload.pull_request;
+        const ctx = buildForkContext(github_context.eventName, prPayload);
+        // `github.context.repo` throws when GITHUB_REPOSITORY is unset and the
+        // event payload carries no `repository` either (always set on a real
+        // GitHub Actions runner; absent only for a direct, non-Actions
+        // invocation, e.g. the dist smoke tests). Read the env var directly so a
+        // run with no repo context still falls through to today's unchanged
+        // behavior (reason stays null) instead of crashing.
+        const baseRepoFullName = process.env.GITHUB_REPOSITORY;
+        const reason = baseRepoFullName ? forkOrDependabotReason(ctx, baseRepoFullName) : null;
+        const noCredential = !credentialAvailable(config, oidcAvailable);
+        forkGenericOnly = resolveForkGenericOnly(reason, noCredential);
+        if (forkGenericOnly) {
+            info(forkOrDependabotNotice(forkGenericOnly.reason));
         }
-        catch (err) {
-            if (!(err instanceof GatewayFailure))
-                throw err;
-            preflightFailure = err;
+        else {
+            try {
+                gateway = await connectGateway(config, {
+                    fetch: globalThis.fetch,
+                    mintIdToken: (audience) => getIDToken(audience),
+                    oidcAvailable,
+                    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+                    log: (msg) => info(msg),
+                });
+                info(`  Gateway: bound to ${gateway.boundLabel ?? gateway.boundDesignSystemId} via ${gateway.credentialSource === 'oidc' ? 'GitHub OIDC' : 'preset-api-key'}`);
+            }
+            catch (err) {
+                if (!(err instanceof GatewayFailure))
+                    throw err;
+                preflightFailure = err;
+            }
         }
     }
     try {
-        await runChecks(config, startTime, gateway, preflightFailure);
+        await runChecks(config, startTime, gateway, preflightFailure, forkGenericOnly);
     }
     finally {
         // A connected client holds a standalone SSE stream that can keep the
@@ -191389,7 +191757,7 @@ async function run() {
             await gateway.close();
     }
 }
-async function runChecks(config, startTime, gateway, preflightFailure) {
+async function runChecks(config, startTime, gateway, preflightFailure, forkGenericOnly) {
     // 2. Get changed files from PR
     const files = await getChangedFiles(config);
     if (files.length === 0 && !preflightFailure) {
@@ -191419,11 +191787,23 @@ async function runChecks(config, startTime, gateway, preflightFailure) {
         await fireAgentEventsCallback(config, noopResult, startTime, 0);
         return;
     }
-    // 3. Validate all files
-    const result = await validateFiles(files, config, gateway);
+    // 3. Validate all files. PRE-3040: a fork/Dependabot generic-only run
+    // clears the design-system fields before calling validateFiles, for THIS
+    // call only, so resolveValidationMode inside it genuinely resolves
+    // 'basic' and uncheckedFiles is never incremented for files that were
+    // never supposed to be checked against a design system in the first
+    // place. `gateway` is already null on this path (connectGateway was never
+    // called), and the ORIGINAL `config` (with designSystemId still set) is
+    // used everywhere else below, including evaluateUncheckedGate.
+    const validateConfig = buildValidateConfig(config, forkGenericOnly);
+    const result = await validateFiles(files, validateConfig, gateway);
     if (preflightFailure) {
         result.gatewayFailure = preflightFailure.message;
         result.gatewayTenantMismatch = preflightFailure.tenantMismatch;
+    }
+    if (forkGenericOnly) {
+        result.forkGenericOnly = true;
+        result.forkGenericOnlyReason = forkGenericOnly.reason;
     }
     info(`Checked ${result.filesChecked} files: ${result.errors} errors, ${result.warnings} warnings`);
     // 3b. PRE-2873: full mode configured, but none of the design system's own
@@ -457107,7 +457487,7 @@ module.exports = /*#__PURE__*/JSON.parse('["AggregateError","Array","ArrayBuffer
 /******/ 	// module cache are used so entry inlining is disabled
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
-/******/ 	var __webpack_exports__ = __nccwpck_require__(__nccwpck_require__.s = 26224);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(__nccwpck_require__.s = 73523);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()

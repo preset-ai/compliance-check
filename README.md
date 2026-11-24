@@ -83,7 +83,7 @@ steps:
   - uses: preset-ai/compliance-check@v1
     with:
       github-token: ${{ secrets.GITHUB_TOKEN }}
-      design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+      design-system-id: '00000000-0000-0000-0000-000000000000'  # your design system's uuid, not a secret
 ```
 
 If your runner can't grant `id-token: write`, pass `preset-api-key` instead.
@@ -93,15 +93,20 @@ for your installation; for an API key, use a Standard key.
 `design-system-id` must be the design system your credential is bound to. The
 gateway always checks against the bound one, so the Action fails the run when
 the two differ rather than report results for a design system you didn't name.
+It's a plain UUID, not a secret. The gateway derives the design system from
+the credential's own binding, so the id is only an assertion the Action checks
+the credential against, never a selector by itself.
 
 ### How the mode is chosen
 
-| `design-system-id` | `supabase-url` / `supabase-key` | Mode |
-|---|---|---|
-| not set | anything | Basic |
-| set | neither | Full, through the preset AI gateway |
-| set | both | Full, reading Supabase directly (deprecated, see below) |
-| set | only one | Configuration error: the check fails |
+| `design-system-id` | `supabase-url` / `supabase-key` | PR origin | Credential | Mode |
+|---|---|---|---|---|
+| not set | anything | any | any | Basic |
+| set | neither | same-repo, or any non-PR event | present | Full, through the preset AI gateway |
+| set | neither | fork PR, or a Dependabot PR | absent | Generic checks only (below) |
+| set | neither | same-repo, or any non-PR event | absent | Configuration error: the check fails |
+| set | both | any | any | Full, reading Supabase directly (deprecated, see below) |
+| set | only one | any | any | Configuration error: the check fails |
 
 In full mode through the gateway, the check fails if the gateway can't be
 reached, rejects the credential, has used up its monthly allowance, or returns
@@ -109,6 +114,31 @@ a result the Action can't read. It never falls back to basic mode, because a
 run that couldn't check your rules isn't a pass. Short rate limits are waited
 out (up to 5 minutes per run). These checks run even when no relevant file
 changed, so a broken setup shows up on the next PR.
+
+### Fork and Dependabot pull requests
+
+A fork pull request, or one opened by `dependabot[bot]`, can't read your
+repository's secrets, so when `design-system-id` is set but no credential is
+available for that run, the Action doesn't fail it the way a same-repo
+misconfiguration fails: it runs the generic checks only (the same ones basic
+mode always runs) and reports `skip`, with a log line and PR comment notice:
+
+> Fork pull request: checked against generic rules only, because forks can't
+> read repository secrets.
+
+(or the same for Dependabot). This is visible only in the Action log and the
+PR comment, not in your workspace dashboard, because the per-run callback
+that populates it uses the same credential check and never fires for a
+credential-less run. A fork or Dependabot PR that CAN authenticate (for
+example, a workflow with `secrets: inherit` for forks) runs full mode exactly
+like a same-repo PR; a same-repo PR, or any event that isn't a pull request,
+with no credential still fails the run as before.
+
+If the source fork is deleted before a run checks the PR again (a re-run, a
+re-triggered workflow, a later push), GitHub no longer reports a head repo at
+all. That reads as same-repo, not as a fork, so a still-credential-less run
+on it fails the ordinary way ("needs a credential") rather than with the fork
+notice above.
 
 ### Deprecated: `supabase-url` and `supabase-key`
 
@@ -142,7 +172,7 @@ while your design system intentionally has no rules yet), set
 - uses: preset-ai/compliance-check@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
-    design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+    design-system-id: '00000000-0000-0000-0000-000000000000'  # your design system's uuid, not a secret
     allow-unchecked: 'true'
 ```
 
@@ -163,7 +193,7 @@ in the first place, so it never fails on this.
 | `layer-id` | no | — | Optional layer for multi-layer systems |
 | `include` | no | `**/*.{tsx,jsx,ts,vue,svelte}` | Comma-separated globs for files to check |
 | `exclude` | no | `**/node_modules/**` | Comma-separated globs for files to skip |
-| `fail-on-errors` | no | `true` | Fail the check if errors found |
+| `fail-on-errors` | no | `true`¹ | Fail the check if errors found. See [failOnErrors precedence](#failonerrors-precedence). |
 | `fail-on-warnings` | no | `false` | Fail the check if warnings found |
 | `comment-on-pr` | no | `true` | Post/update a PR comment |
 | `upload-sarif` | no | `false` | Generate SARIF file |
@@ -175,6 +205,33 @@ in the first place, so it never fails on this.
 | `mcp-oidc-audience` | no | `https://presetai.dev` | Audience claim requested when minting the OIDC token. Override only for staging/self-hosted gateways. |
 | `disable-callback` | no | `false` | Disable callback regardless of available auth |
 | `allow-unchecked` | no | `false` | In full mode, accept a run where none of your design system's binding rules applied to any changed file instead of failing it. See [Full mode and unchecked files](#full-mode-and-unchecked-files). |
+
+¹ `fail-on-errors` has no declared default in `action.yml` anymore: leaving it
+unset lets `.presetrc` `mode` decide it live. `true` is only the final
+fallback when nothing (not this input, not `.presetrc`) says otherwise. See
+[failOnErrors precedence](#failonerrors-precedence).
+
+### `failOnErrors` precedence
+
+Four steps, highest first:
+
+1. An explicit `.presetrc` `"failOnErrors": true/false` wins outright.
+2. Otherwise, an explicit `fail-on-errors` input (set to anything other than
+   empty) wins. Any value other than exactly `'false'` is treated as true,
+   matching the input's historical behavior.
+3. Otherwise, `.presetrc` `"mode"` decides it: `advisory` and `warn` resolve
+   to `false` (report findings, don't fail), `enforce` resolves to `true`.
+4. Otherwise, the default is `true`.
+
+`mode` is read live, on every run, from whatever `.presetrc` is checked out on
+that commit, not baked in once by `preset ci init`. If you set `fail-on-errors`
+on the workflow step itself (step 2) while `.presetrc` also sets `mode` (step
+3), the explicit input still wins, but the Action logs a warning naming the
+mode it ignored and which setting actually won, so editing `.presetrc mode`
+later doesn't silently do nothing. This matters for any workflow generated by
+a `preset ci init` from before this precedence shipped: `advisory`/`warn`
+workflows already commit a literal `fail-on-errors: 'false'` line, which would
+otherwise shadow a later `mode: enforce` edit with no signal anywhere.
 
 ## Outputs
 
@@ -199,7 +256,7 @@ Enable health scoring to track your design system's overall quality over time. T
     github-token: ${{ secrets.GITHUB_TOKEN }}
     supabase-url: ${{ secrets.PRESET_SUPABASE_URL }}
     supabase-key: ${{ secrets.PRESET_SUPABASE_KEY }}
-    design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+    design-system-id: '00000000-0000-0000-0000-000000000000'  # your design system's uuid, not a secret
     score-threshold: '70'
     regression-threshold: '5'
 ```
@@ -234,11 +291,17 @@ Create a `.presetrc` file in your repo root to override defaults without changin
   "failOnErrors": true,
   "failOnWarnings": false,
   "scoreThreshold": 70,
-  "regressionThreshold": 5
+  "regressionThreshold": 5,
+  "mode": "enforce"
 }
 ```
 
-Only the seven fields above are recognized. If you add other keys to `.presetrc`, they're ignored locally and never reported via the [per-run telemetry callback](#per-run-telemetry).
+The seven fields above `mode` are the ones reported via the [per-run telemetry
+callback](#per-run-telemetry)'s allowlist. `mode` (`advisory` | `warn` |
+`enforce`) is an eighth field the Action reads live for
+[`failOnErrors` precedence](#failonerrors-precedence) only, and it's never
+reported through the callback. Any other key is ignored locally and never
+reported either way.
 
 ## Per-Run Telemetry
 
@@ -267,7 +330,7 @@ jobs:
       - uses: preset-ai/compliance-check@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+          design-system-id: '00000000-0000-0000-0000-000000000000'  # your design system's uuid, not a secret
 ```
 
 #### Legacy API key fallback
@@ -278,7 +341,7 @@ If your runner can't grant `id-token: write` (some self-hosted setups) or you ha
 - uses: preset-ai/compliance-check@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
-    design-system-id: ${{ secrets.PRESET_DESIGN_SYSTEM_ID }}
+    design-system-id: '00000000-0000-0000-0000-000000000000'  # your design system's uuid, not a secret
     preset-api-key: ${{ secrets.PRESET_API_KEY }}
 ```
 
@@ -359,9 +422,16 @@ preset ci init --yes
 # Preview without writing
 preset ci init --dry-run
 
+# Check against your design system's own rules (add a PRESET_API_KEY secret)
+preset ci init --design-system-id <your-design-system-id>
+
 # With specific options
-preset ci init --fail-on-warnings --score-threshold 70 --sarif
+preset ci init --fail-on-warnings --sarif
 ```
+
+The generated workflow follows `.presetrc` `mode` as it is when you run the
+command: `advisory` and `warn` report findings without failing the check, and
+`enforce` fails it on errors. Re-run `preset ci init` after changing `mode`.
 
 The CLI is also offered during `preset init` and `preset setup` flows.
 

@@ -17,7 +17,7 @@ inputs:
     description: 'DEPRECATED. Supabase anon key for the direct mode described under supabase-url.'
     required: false
   design-system-id:
-    description: 'Design system UUID. Turns on full mode, which checks changed files against this design system through the preset AI gateway (GitHub OIDC with id-token: write, or preset-api-key). Must be the design system the credential is bound to; a mismatch fails the run.'
+    description: 'Design system UUID. Turns on full mode, which checks changed files against this design system through the preset AI gateway (GitHub OIDC with id-token: write, or preset-api-key). Must be the design system the credential is bound to; a mismatch fails the run. A fork or Dependabot pull request that has no credential (forks and Dependabot cannot read repository secrets) runs generic checks only instead of failing; any other event or PR with no credential still fails.'
     required: false
   layer-id:
     description: 'Optional layer ID for multi-layer design systems'
@@ -31,9 +31,8 @@ inputs:
     required: false
     default: '**/node_modules/**'
   fail-on-errors:
-    description: 'Fail the check if errors are found'
+    description: 'Fail the check if errors are found. Precedence: an explicit .presetrc failOnErrors wins outright; otherwise an explicit value for this input wins; otherwise .presetrc mode decides it (advisory and warn report findings without failing, enforce fails on errors); otherwise the default is true. Setting this input while .presetrc mode is also set logs a warning naming which one actually won, since mode then does nothing.'
     required: false
-    default: 'true'
   composition-checks:
     description: 'Run static composition-conformance checks (forbidden Card>Card, max-depth, no-arbitrary-spacing) against changed JSX/TSX files. PRE-1484 first slice.'
     required: false
