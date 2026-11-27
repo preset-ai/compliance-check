@@ -121,16 +121,18 @@ A fork pull request, or one opened by `dependabot[bot]`, can't read your
 repository's secrets, so when `design-system-id` is set but no credential is
 available for that run, the Action doesn't fail it the way a same-repo
 misconfiguration fails: it runs the generic checks only (the same ones basic
-mode always runs) and reports `skip`, with a log line and PR comment notice:
+mode always runs) and logs this notice:
 
 > Fork pull request: checked against generic rules only, because forks can't
 > read repository secrets.
 
-(or the same for Dependabot). This is visible only in the Action log and the
-PR comment, not in your workspace dashboard, because the per-run callback
+(or the same for Dependabot). This is visible only in the Action log, not in
+the PR comment (GitHub gives these runs a read-only token) and not in your
+workspace dashboard, because the per-run callback
 that populates it uses the same credential check and never fires for a
 credential-less run. A fork or Dependabot PR that CAN authenticate (for
-example, a workflow with `secrets: inherit` for forks) runs full mode exactly
+example, a `pull_request_target` workflow, which runs with the base repository's
+secrets) runs full mode exactly
 like a same-repo PR; a same-repo PR, or any event that isn't a pull request,
 with no credential still fails the run as before.
 
@@ -429,9 +431,21 @@ preset ci init --design-system-id <your-design-system-id>
 preset ci init --fail-on-warnings --sarif
 ```
 
-The generated workflow follows `.presetrc` `mode` as it is when you run the
-command: `advisory` and `warn` report findings without failing the check, and
-`enforce` fails it on errors. Re-run `preset ci init` after changing `mode`.
+The Action reads `.presetrc` `mode`/`failOnErrors` itself, live, on every run
+(PRE-3040/PRE-3041), for whether *errors* fail the check: `advisory` and `warn`
+resolve to not failing on them, and `enforce` fails on them. The generated workflow
+commits to nothing about `mode`/`failOnErrors`, so editing `.presetrc` later takes
+effect on the next run, with no need to re-run `preset ci init`. `preset ci init`
+also seeds a `.presetrc` (`mode: advisory`) the first time, if none exists anywhere
+in the project yet. Without one on disk, there is nothing for this live read to
+find, and the Action's own fallback with nothing configured is `fail-on-errors: true`,
+the opposite of advisory.
+
+`fail-on-warnings` is **not** re-read live the same way: it has no `.presetrc.mode`
+equivalent, so once `--fail-on-warnings` bakes it into the workflow under an
+`enforce` run, it keeps failing the check on warnings even after `mode` eases back
+to advisory/warn, until you re-run `preset ci init` or set `.presetrc`
+`failOnWarnings` explicitly.
 
 The CLI is also offered during `preset init` and `preset setup` flows.
 

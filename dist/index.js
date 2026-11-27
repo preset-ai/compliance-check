@@ -151710,7 +151710,7 @@ class StreamableHTTPClientTransport {
  * whose callback payload and MCP handshake disagree about which version is
  * running. Both now import this constant, so there is one site to bump.
  */
-const ACTION_VERSION = '1.4.0';
+const ACTION_VERSION = '1.4.1';
 
 ;// CONCATENATED MODULE: ./src/gateway-client.ts
 /**
@@ -168286,6 +168286,31 @@ function resolveForkGenericOnly(reason, noCredential) {
 function buildValidateConfig(config, forkGenericOnly) {
     return forkGenericOnly ? { ...config, designSystemId: undefined, supabaseUrl: undefined, supabaseKey: undefined } : config;
 }
+/**
+ * PRE-3042: the log level for a failed PR comment post.
+ *
+ * The comment is ALWAYS attempted: whether the token can write is decided by
+ * GitHub (repository settings, the job's `permissions:`), not by anything
+ * this Action can infer, so skipping on a guess would suppress comments that
+ * would have posted (Codex rounds 1 and 2).
+ *
+ * Only ONE failure is downgraded to `info`: the read-only-token refusal a
+ * fork/Dependabot `pull_request` run gets by default. All three must hold
+ * (Codex round 3): the run is generic-only; the event is `pull_request` (a
+ * `pull_request_target` token is the base repository's, so a 403 there is a
+ * real permission problem); and the error is a 403 carrying GitHub's
+ * permission message, not another 403 such as a rate limit. Anything else,
+ * and every failure on a run that is not generic-only, stays a warning.
+ */
+const READ_ONLY_TOKEN_MESSAGE = /Resource not accessible by integration/i;
+function commentFailureLogLevel(forkGenericOnly, eventName, error) {
+    if (forkGenericOnly === null || eventName !== 'pull_request')
+        return 'warning';
+    if (typeof error !== 'object' || error === null)
+        return 'warning';
+    const { status, message } = error;
+    return status === 403 && typeof message === 'string' && READ_ONLY_TOKEN_MESSAGE.test(message) ? 'info' : 'warning';
+}
 /** Whether this run is a fork or Dependabot PR. See `forkOrDependabotReason` for which one. */
 function isForkOrDependabotPR(ctx, baseRepoFullName) {
     return forkOrDependabotReason(ctx, baseRepoFullName) !== null;
@@ -184697,6 +184722,26 @@ function deriveOutcome(_config, result, failReasonsLength) {
         return 'skip';
     return 'pass';
 }
+/**
+ * PRE-3042: the log level for `fireAgentEventsCallback`'s "no auth
+ * available" skip. A fork or Dependabot `pull_request` run has no secrets
+ * and no OIDC token, so landing on this branch is the expected shape of
+ * every such run, not a problem to flag; it logs at `info` instead of
+ * `warning`. Both must hold (Codex round 4, the same event check
+ * `commentFailureLogLevel` got in round 3): the run is generic-only AND the
+ * event is `pull_request`. A `pull_request_target` run uses the base
+ * repository's credentials, so no auth there is a setup mistake and keeps
+ * the warning, as does every run that is not generic-only.
+ *
+ * Extracted as its own pure function, same discipline as `deriveOutcome`
+ * above, so the branch is exercised by a real test instead of only by
+ * reading `agent-events-callback.ts`'s source (that module pulls
+ * `@actions/core` + `@actions/github` and cannot be imported by this
+ * package's CJS-mode tsx test runner).
+ */
+function noAuthLogLevel(result, eventName) {
+    return result.forkGenericOnly && eventName === 'pull_request' ? 'info' : 'warning';
+}
 // PRE-1395: cap per-callback violation detail to keep the POST body bounded.
 // Large DSes can emit thousands of violations; the parent outcome row's
 // violation_summary still records the true totals, so capping the detail
@@ -184859,11 +184904,22 @@ fixesApplied = 0, rulesApplied = []) {
     const { resolved: auth, lastError: authError } = await resolveAuthHeader(config, (audience) => getIDToken(audience));
     if (!auth) {
         const oidcDetail = authError ? ` (OIDC: ${authError})` : '';
-        warning(`[preset-callback] no auth available; skipping callback${oidcDetail}. ` +
-            'Your Sentinel inbox will not receive signal from this Action. ' +
-            'Recommended: install the preset AI GitHub App and set `permissions: id-token: write` on the workflow for OIDC auth. ' +
-            'Fallback: issue an API key at https://app.presetai.dev/connect and pass it as `preset-api-key:`. ' +
-            'To suppress this warning, set `disable-callback: true`.');
+        // PRE-3042: `noAuthLogLevel` decides info vs. warning (see its own
+        // doc comment, agent-events-callback-helpers.ts). The info copy is its
+        // own: the warning's setup advice is impossible on a fork or Dependabot
+        // run, and it must not call itself a warning.
+        if (noAuthLogLevel(result, github_context.eventName) === 'info') {
+            info(`[preset-callback] no auth available on this fork or Dependabot run; skipping callback${oidcDetail}. ` +
+                "This is expected: forks and Dependabot can't read repository secrets, so this run sends no signal to your Sentinel inbox.");
+        }
+        else {
+            const message = `[preset-callback] no auth available; skipping callback${oidcDetail}. ` +
+                'Your Sentinel inbox will not receive signal from this Action. ' +
+                'Recommended: install the preset AI GitHub App and set `permissions: id-token: write` on the workflow for OIDC auth. ' +
+                'Fallback: issue an API key at https://app.presetai.dev/connect and pass it as `preset-api-key:`. ' +
+                'To suppress this warning, set `disable-callback: true`.';
+            warning(message);
+        }
         return;
     }
     debug(`[preset-callback] auth source: ${auth.source}`);
@@ -191690,20 +191746,6 @@ async function run() {
     const mode = decision.mode;
     const healthEnabled = config.scoreThreshold > 0 || config.regressionThreshold > 0;
     const fullLabel = mode === 'gateway' ? ' + full (preset AI gateway)' : mode === 'legacy' ? ' + full (direct Supabase, deprecated)' : '';
-    info('Preset Design System Check');
-    info(`  Modes: defaults${fullLabel}${healthEnabled ? ' + health' : ''}`);
-    info(`  Include: ${config.include.join(', ')}`);
-    info(`  Exclude: ${config.exclude.join(', ')}`);
-    if (mode === 'legacy') {
-        warning('supabase-url and supabase-key are deprecated for validation. An anonymous key cannot read a private ' +
-            'design system, so full mode checks nothing against it. Remove both inputs and grant the job ' +
-            '`permissions: id-token: write` (with the preset AI GitHub App installed) to validate through the preset AI gateway.');
-    }
-    // PRE-2873 step 2: in gateway mode the preflight (credential, connect, bound
-    // design system, validate_code in the catalog) runs BEFORE the zero-file
-    // return, so a misconfigured run fails even when nothing relevant changed.
-    let gateway = null;
-    let preflightFailure = null;
     // PRE-3040: a fork or Dependabot PR cannot read repository secrets, so a
     // missing credential there is not the customer's misconfiguration: it is
     // what forks and Dependabot always look like. Decided from inputs only,
@@ -191711,9 +191753,16 @@ async function run() {
     // (same-repo PR or any non-PR event with no credential) are UNCHANGED:
     // they still hard-fail via preflightFailure below, because `reason` is
     // null for them and the carve-out never applies.
+    //
+    // PRE-3042: decided BEFORE the "Modes:" line below (not after, as PRE-3040
+    // left it) so that line never claims full mode on a run that is about to
+    // be downgraded to generic-only. Moving only the DECISION up, not the
+    // gateway-connect attempt itself, keeps every other log line (including
+    // the per-mode ordering) identical for a non-fork run: `oidcAvailable` is
+    // captured once here and reused below for the connectGateway() path.
     let forkGenericOnly = null;
+    const oidcAvailable = () => Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN);
     if (mode === 'gateway') {
-        const oidcAvailable = () => Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN);
         const prPayload = github_context.payload.pull_request;
         const ctx = buildForkContext(github_context.eventName, prPayload);
         // `github.context.repo` throws when GITHUB_REPOSITORY is unset and the
@@ -191726,6 +191775,25 @@ async function run() {
         const reason = baseRepoFullName ? forkOrDependabotReason(ctx, baseRepoFullName) : null;
         const noCredential = !credentialAvailable(config, oidcAvailable);
         forkGenericOnly = resolveForkGenericOnly(reason, noCredential);
+    }
+    // PRE-3042: a fork/Dependabot generic-only run never claims "full" here;
+    // it is about to be checked against generic rules only, decided above.
+    const effectiveFullLabel = forkGenericOnly ? '' : fullLabel;
+    info('Preset Design System Check');
+    info(`  Modes: defaults${effectiveFullLabel}${healthEnabled ? ' + health' : ''}`);
+    info(`  Include: ${config.include.join(', ')}`);
+    info(`  Exclude: ${config.exclude.join(', ')}`);
+    if (mode === 'legacy') {
+        warning('supabase-url and supabase-key are deprecated for validation. An anonymous key cannot read a private ' +
+            'design system, so full mode checks nothing against it. Remove both inputs and grant the job ' +
+            '`permissions: id-token: write` (with the preset AI GitHub App installed) to validate through the preset AI gateway.');
+    }
+    // PRE-2873 step 2: in gateway mode the preflight (credential, connect, bound
+    // design system, validate_code in the catalog) runs BEFORE the zero-file
+    // return, so a misconfigured run fails even when nothing relevant changed.
+    let gateway = null;
+    let preflightFailure = null;
+    if (mode === 'gateway') {
         if (forkGenericOnly) {
             info(forkOrDependabotNotice(forkGenericOnly.reason));
         }
@@ -191783,6 +191851,10 @@ async function runChecks(config, startTime, gateway, preflightFailure, forkGener
             fileViolations: [],
             modes: ['defaults'],
             byRule: {},
+            // PRE-3042: carry the generic-only decision onto the no-op result too,
+            // so a fork/Dependabot PR that changes no relevant files logs the
+            // callback's no-auth skip as info, the same as one that does.
+            ...(forkGenericOnly ? { forkGenericOnly: true, forkGenericOnlyReason: forkGenericOnly.reason } : {}),
         };
         await fireAgentEventsCallback(config, noopResult, startTime, 0);
         return;
@@ -191838,12 +191910,20 @@ async function runChecks(config, startTime, gateway, preflightFailure, forkGener
     // 5. Create annotations (inline on PR diff)
     createAnnotations(result);
     // 6. Post/update PR comment
+    // PRE-3042: always attempt; only a generic-only `pull_request` run's
+    // read-only-token 403 logs as info, see commentFailureLogLevel. Every
+    // other failure, and every failure on a same-repo run, is still a warning.
     if (config.commentOnPr) {
         try {
             await postOrUpdateComment(result, config);
         }
         catch (e) {
-            warning(`Failed to post PR comment: ${e}`);
+            if (commentFailureLogLevel(forkGenericOnly, github_context.eventName, e) === 'info') {
+                info(`PR comment not posted: this run's token can't write to the pull request (${e}). The notice above is the result.`);
+            }
+            else {
+                warning(`Failed to post PR comment: ${e}`);
+            }
         }
     }
     // 7. Generate SARIF file
